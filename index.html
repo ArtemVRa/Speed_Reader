@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Speed Reader">
+  <title>Speed Reader</title>
+
+  <!-- JSZip для открытия EPUB (загружается из CDN один раз, потом кешируется) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:     #12121f;
+      --card:   #1c1c2e;
+      --accent: #e94560;
+      --btn:    #0f3460;
+      --btn-hv: #1a4d8a;
+      --fg:     #f0f0f0;
+      --dim:    #7777aa;
+      --side:   #9090b8;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, Helvetica, Arial, sans-serif;
+      overflow: hidden;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;          /* dynamic viewport height — учитывает Safari UI */
+      padding: env(safe-area-inset-top) env(safe-area-inset-right)
+               env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+
+    /* ── Шапка ─────────────────────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 20px 6px;
+      flex-shrink: 0;
+    }
+    .title  { font-size: 13px; font-weight: bold; color: var(--accent); letter-spacing: 1px; }
+    .finfo  { font-size: 11px; color: var(--dim); max-width: 55%; text-align: right;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* ── Карточка со словом ────────────────────────────────────────────────── */
+    .card {
+      flex: 1;
+      background: var(--card);
+      margin: 0 14px;
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+      touch-action: none;       /* нужно для жестов */
+    }
+
+    /* Горизонтальный режим */
+    #hDisplay {
+      display: flex;
+      align-items: baseline;
+      justify-content: center;
+      padding: 12px 20px;
+      flex-wrap: nowrap;
+    }
+
+    /* Вертикальный режим */
+    #vDisplay {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      overflow: hidden;          /* колонки управляются JS */
+    }
+    #vDisplay.active { display: flex; }
+
+    .card-sep {
+      width: calc(100% - 60px);
+      height: 1px;
+      background: #2a2a44;
+      margin: 4px 0;
+      flex-shrink: 0;
+    }
+
+    .pos-lbl {
+      font-size: 11px;
+      color: var(--dim);
+      padding: 4px 0 8px;
+      flex-shrink: 0;
+    }
+
+    /* ── Прогресс ──────────────────────────────────────────────────────────── */
+    .pb-wrap { padding: 6px 14px 2px; flex-shrink: 0; }
+    .pb-track { height: 4px; background: var(--btn); border-radius: 2px; overflow: hidden; }
+    .pb-fill  { height: 100%; background: var(--accent); border-radius: 2px;
+                 width: 0%; transition: width .1s linear; }
+    .pb-text  { font-size: 10px; color: var(--dim); text-align: center; padding-top: 2px; }
+
+    /* ── Панель управления ─────────────────────────────────────────────────── */
+    .controls { padding: 6px 14px 10px; flex-shrink: 0; }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      margin-bottom: 5px;
+    }
+
+    .row-label {
+      font-size: 13px;
+      font-weight: bold;
+      color: var(--accent);
+      min-width: 96px;
+      text-align: center;
+    }
+    .row-label.dim { color: var(--dim); }
+
+    /* Кнопки */
+    .btn {
+      background: var(--btn);
+      color: var(--fg);
+      border: none;
+      border-radius: 8px;
+      padding: 10px 13px;
+      font-size: 14px;
+      font-family: inherit;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      transition: background .1s;
+      white-space: nowrap;
+    }
+    .btn:active        { background: var(--accent); }
+    .btn.accent        { background: var(--accent); }
+    .btn.accent:active { background: #ff6b84; }
+    .btn.on            { background: var(--accent); }
+
+    .btn-sm { padding: 8px 9px; font-size: 12px; }
+
+    /* ── Модальное окно вставки ────────────────────────────────────────────── */
+    .modal-bg {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100; padding: 20px;
+    }
+    .modal {
+      background: var(--card);
+      border-radius: 14px;
+      padding: 20px;
+      width: 100%; max-width: 520px;
+    }
+    .modal h3 { font-size: 14px; margin-bottom: 10px; }
+    .modal textarea {
+      width: 100%; height: 180px;
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--btn); border-radius: 8px;
+      padding: 10px; font-size: 14px; resize: none;
+      font-family: inherit;
+    }
+    .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
+    /* ── Скрытый input для файлов ──────────────────────────────────────────── */
+    #fileInput { display: none; }
+  </style>
+</head>
+<body>
+
+<!-- Шапка -->
+<div class="header">
+  <span class="title">SPEED READER</span>
+  <span class="finfo" id="finfo">файл не открыт</span>
+</div>
+
+<!-- Карточка -->
+<div class="card" id="card">
+  <!-- Горизонтальный режим -->
+  <div id="hDisplay">
+    <span id="wLeft"  style="font-family:Georgia,serif;color:var(--side)"></span>
+    <span id="wOrp"   style="font-family:Georgia,serif;font-weight:bold;color:var(--accent)">Открой файл или вставь текст</span>
+    <span id="wRight" style="font-family:Georgia,serif;color:var(--side)"></span>
+  </div>
+  <!-- Вертикальный режим -->
+  <div id="vDisplay"></div>
+
+  <div class="card-sep"></div>
+  <div class="pos-lbl" id="posLbl">Нажми ▶ после загрузки</div>
+</div>
+
+<!-- Прогресс -->
+<div class="pb-wrap">
+  <div class="pb-track"><div class="pb-fill" id="pbFill"></div></div>
+  <div class="pb-text" id="pbText">0 / 0</div>
+</div>
+
+<!-- Управление -->
+<div class="controls">
+  <!-- WPM -->
+  <div class="row">
+    <button class="btn btn-sm" ontouchend="adj('wpm',-100)" onclick="adj('wpm',-100)">−−</button>
+    <button class="btn btn-sm" ontouchend="adj('wpm',-25)"  onclick="adj('wpm',-25)">−</button>
+    <span class="row-label" id="wpmLbl">300 WPM</span>
+    <button class="btn btn-sm" ontouchend="adj('wpm',25)"   onclick="adj('wpm',25)">+</button>
+    <button class="btn btn-sm" ontouchend="adj('wpm',100)"  onclick="adj('wpm',100)">++</button>
+  </div>
+
+  <!-- Шрифт -->
+  <div class="row">
+    <button class="btn btn-sm" ontouchend="adj('fs',-8)" onclick="adj('fs',-8)">А−−</button>
+    <button class="btn btn-sm" ontouchend="adj('fs',-2)" onclick="adj('fs',-2)">А−</button>
+    <span class="row-label dim" id="fsLbl">шрифт 52</span>
+    <button class="btn btn-sm" ontouchend="adj('fs',2)"  onclick="adj('fs',2)">А+</button>
+    <button class="btn btn-sm" ontouchend="adj('fs',8)"  onclick="adj('fs',8)">А++</button>
+  </div>
+
+  <!-- Основные кнопки -->
+  <div class="row">
+    <button class="btn"        onclick="openFile()">Открыть</button>
+    <button class="btn"        onclick="pasteText()">⎘ Вставить</button>
+    <button class="btn accent" id="playBtn" onclick="togglePlay()">▶ Старт</button>
+    <button class="btn"        onclick="restart()">↺ Начало</button>
+    <button class="btn"        id="vertBtn" onclick="toggleVertical()">↕ Верт.</button>
+  </div>
+
+  <!-- Перемотка -->
+  <div class="row">
+    <button class="btn btn-sm" onclick="skip(-100)">−100</button>
+    <button class="btn btn-sm" onclick="skip(-10)">−10</button>
+    <button class="btn btn-sm" onclick="skip(-1)">−1</button>
+    <button class="btn btn-sm" onclick="skip(1)">+1</button>
+    <button class="btn btn-sm" onclick="skip(10)">+10</button>
+    <button class="btn btn-sm" onclick="skip(100)">+100</button>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept=".txt,.epub,.md" onchange="handleFile(event)">
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   Состояние
+═══════════════════════════════════════════════════════════════════════════ */
+let words    = [];
+let wordMeta = [];   // параллельный массив: {isHeading, level} для каждого слова
+let index    = 0;
+let wpm      = 300;
+let fontSize = 52;
+let vertical = false;
+let running  = false;
+let paused   = false;
+let timer    = null;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ORP (Optimal Recognition Point)
+═══════════════════════════════════════════════════════════════════════════ */
+function orpIdx(word) {
+  const n = word.length;
+  if (n <= 1)  return 0;
+  if (n <= 5)  return 1;
+  if (n <= 9)  return 2;
+  if (n <= 13) return 3;
+  return 4;
+}
+
+/* Слово заканчивает предложение, если за ним стоит . ! ? … (+ кавычки/скобки) */
+function isSentenceEnd(word) {
+  return /[.!?…]["»')\]]*$/.test(word);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Отображение слова
+═══════════════════════════════════════════════════════════════════════════ */
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showWord() {
+  if (!words.length) return;
+  const idx    = Math.max(0, Math.min(index, words.length - 1));
+  const word   = words[idx];
+  const isHead = (wordMeta[idx] || {}).isHeading || false;
+
+  vertical ? drawVertical(word, isHead) : drawHorizontal(word, isHead);
+
+  const total = words.length;
+  document.getElementById('posLbl').textContent = `${idx + 1} / ${total}`;
+  const pct = total > 1 ? (idx / (total - 1)) * 100 : 100;
+  document.getElementById('pbFill').style.width = pct + '%';
+  document.getElementById('pbText').textContent  = `${idx + 1} / ${total}`;
+}
+
+function drawHorizontal(word, isHead = false) {
+  const i    = orpIdx(word);
+  const fs   = fontSize + 'px';
+  const ul   = isHead ? ';text-decoration:underline;text-underline-offset:4px' : '';
+  const base = `font-family:Georgia,serif;font-size:${fs}${ul}`;
+
+  document.getElementById('wLeft').setAttribute('style',  base + ';color:var(--side)');
+  document.getElementById('wOrp').setAttribute('style',   base + ';font-weight:bold;color:var(--accent)');
+  document.getElementById('wRight').setAttribute('style', base + ';color:var(--side)');
+
+  document.getElementById('wLeft').textContent  = word.slice(0, i);
+  document.getElementById('wOrp').textContent   = word[i] ?? '';
+  document.getElementById('wRight').textContent = word.slice(i + 1);
+}
+
+function drawVertical(word, isHead = false) {
+  /* Каждая буква — блочный span с фиксированной высотой.
+     height = line-height = int(fontSize * 0.7) + 4  —  та же формула что в Python.
+     Символ выше этого значения «вылезет» но не сдвинет следующий. */
+  const lineH  = Math.round(fontSize * 0.7) + 4;
+  const card   = document.getElementById('card');
+  const cardH  = card.clientHeight - 60;   // примерный отступ для .pos-lbl
+  const colCap = Math.max(1, Math.floor(cardH / lineH));
+  const letters = [...word];
+  const n       = letters.length;
+  const orp     = orpIdx(word);
+  const nCols   = Math.ceil(n / colCap);
+
+  /* Строим колонки как flex-row */
+  let html = `<div style="display:flex;flex-direction:row;align-items:flex-start;justify-content:center">`;
+
+  for (let col = 0; col < nCols; col++) {
+    html += `<div style="display:flex;flex-direction:column;align-items:center">`;
+    for (let row = 0; row < colCap; row++) {
+      const li = col * colCap + row;
+      if (li >= n) break;
+      const letter  = letters[li];
+      const isOrp   = li === orp;
+      const color   = isOrp ? 'var(--accent)' : 'var(--side)';
+      const weight  = isOrp ? 'bold' : 'normal';
+      const ul      = isHead ? 'text-decoration:underline;text-underline-offset:2px;' : '';
+      html += `<span style="display:block;font-family:Georgia,serif;font-size:${fontSize}px;` +
+              `font-weight:${weight};color:${color};${ul}` +
+              `height:${lineH}px;line-height:${lineH}px;` +
+              `text-align:center;overflow:visible;white-space:nowrap">` +
+              `${esc(letter)}</span>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  document.getElementById('vDisplay').innerHTML = html;
+}
+
+function setMode(vert) {
+  vertical = vert;
+  document.getElementById('hDisplay').style.display = vert ? 'none' : 'flex';
+  document.getElementById('vDisplay').style.display = vert ? 'flex' : 'none';
+  document.getElementById('vertBtn').classList.toggle('on', vert);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Воспроизведение
+═══════════════════════════════════════════════════════════════════════════ */
+function togglePlay() {
+  if (!words.length) return;
+  if (!running) {
+    running = true; paused = false;
+    document.getElementById('playBtn').textContent = '⏸ Пауза';
+    tick();
+  } else if (paused) {
+    paused = false;
+    document.getElementById('playBtn').textContent = '⏸ Пауза';
+    tick();
+  } else {
+    paused = true;
+    document.getElementById('playBtn').textContent = '▶ Продолжить';
+    clearTimeout(timer); timer = null;
+  }
+}
+
+function tick() {
+  if (!running || paused) return;
+  if (index >= words.length) { finish(); return; }
+  showWord();
+  const base  = Math.round(60000 / wpm);
+  const delay = isSentenceEnd(words[index]) ? base * 2 : base;
+  timer = setTimeout(advance, delay);
+}
+
+function advance() {
+  if (!running || paused) return;
+  index++;
+  tick();
+}
+
+function finish() {
+  running = false;
+  document.getElementById('playBtn').textContent = '▶ Старт';
+  if (vertical) {
+    document.getElementById('vDisplay').innerHTML =
+      `<span style="font-family:Georgia,serif;font-size:${fontSize}px;color:var(--accent);font-weight:bold">✓</span>`;
+  } else {
+    document.getElementById('wLeft').textContent  = '';
+    document.getElementById('wOrp').textContent   = '✓';
+    document.getElementById('wRight').textContent = '';
+  }
+  document.getElementById('posLbl').textContent = '— Конец текста —';
+  document.getElementById('pbFill').style.width = '100%';
+}
+
+function stop() {
+  running = false; paused = false;
+  clearTimeout(timer); timer = null;
+  document.getElementById('playBtn').textContent = '▶ Старт';
+}
+
+function restart() {
+  stop(); index = 0;
+  if (words.length) showWord();
+}
+
+function skip(n) {
+  if (!words.length) return;
+  const wasPlaying = running && !paused;
+  clearTimeout(timer); timer = null;
+  index = Math.max(0, Math.min(index + n, words.length - 1));
+  wasPlaying ? tick() : showWord();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Настройки
+═══════════════════════════════════════════════════════════════════════════ */
+function adj(what, delta) {
+  if (what === 'wpm') {
+    wpm = Math.max(50, Math.min(1200, wpm + delta));
+    document.getElementById('wpmLbl').textContent = `${wpm} WPM`;
+  } else {
+    fontSize = Math.max(16, Math.min(120, fontSize + delta));
+    document.getElementById('fsLbl').textContent = `шрифт ${fontSize}`;
+    if (words.length) showWord();
+  }
+}
+
+function toggleVertical() {
+  setMode(!vertical);
+  if (words.length) showWord();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Загрузка текста
+═══════════════════════════════════════════════════════════════════════════ */
+function tokenize(text) {
+  return text.trim().split(/\s+/).filter(w => w.length > 0);
+}
+
+/* ── Загрузчик с поддержкой метаданных (заголовки Markdown) ─────────────── */
+function loadContent(ws, meta, source) {
+  stop();
+  words    = ws;
+  wordMeta = meta ?? ws.map(() => ({ isHeading: false, level: 0 }));
+  index    = 0;
+  document.getElementById('finfo').textContent =
+    `${source}  (${ws.length.toLocaleString('ru')} слов)`;
+  if (ws.length) showWord();
+}
+
+function loadWords(ws, source) {
+  loadContent(ws, null, source);
+}
+
+/* ── Markdown ───────────────────────────────────────────────────────────── */
+function stripMarkdown(text) {
+  return text
+    .replace(/!\[.*?\]\(.*?\)/g, '')             // изображения
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')     // ссылки → текст
+    .replace(/`{3}[\s\S]*?`{3}/gm, '')           // блоки кода
+    .replace(/`([^`]+)`/g, '$1')                 // инлайн-код
+    .replace(/\*{2}([^*]+)\*{2}/g, '$1')         // **жирный**
+    .replace(/_{2}([^_]+)_{2}/g, '$1')           // __жирный__
+    .replace(/\*([^*\n]+)\*/g, '$1')             // *курсив*
+    .replace(/_([^_\n]+)_/g, '$1')              // _курсив_
+    .replace(/~~([^~]+)~~/g, '$1')              // ~~зачёркнутый~~
+    .replace(/^[-*+]\s+/gm, '')                 // маркеры списков
+    .replace(/^\d+\.\s+/gm, '')                 // нумерованные списки
+    .replace(/^>\s*/gm, '')                     // цитаты
+    .replace(/^-{3,}$/gm, '')                   // горизонтальная черта
+    .replace(/\[[ x]\]/gi, '')                  // чекбоксы
+    .trim();
+}
+
+function parseMarkdown(text) {
+  const ws   = [];
+  const meta = [];
+
+  for (const rawLine of text.split('\n')) {
+    const line      = rawLine.trim();
+    if (!line) continue;
+
+    const headMatch = line.match(/^(#{1,6})\s+(.+)/);
+    const isHeading = !!headMatch;
+    const level     = isHeading ? headMatch[1].length : 0;
+    const content   = stripMarkdown(isHeading ? headMatch[2] : line);
+
+    for (const w of content.split(/\s+/).filter(Boolean)) {
+      ws.push(w);
+      meta.push({ isHeading, level });
+    }
+  }
+
+  return { ws, meta };
+}
+
+/* Открыть файл */
+function openFile() {
+  document.getElementById('fileInput').click();
+}
+
+function handleFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  const reader = new FileReader();
+  if (ext === 'epub') {
+    reader.onload = ev => loadEpub(ev.target.result, file.name);
+    reader.readAsArrayBuffer(file);
+  } else if (ext === 'md') {
+    reader.onload = ev => {
+      const { ws, meta } = parseMarkdown(ev.target.result);
+      loadContent(ws, meta, file.name);
+    };
+    reader.readAsText(file, 'utf-8');
+  } else {
+    reader.onload = ev => askMarkdownAndLoad(ev.target.result, file.name);
+    reader.readAsText(file, 'utf-8');
+  }
+  e.target.value = '';
+}
+
+/* Спросить «Это Markdown?» и загрузить соответствующим образом */
+function askMarkdownAndLoad(text, source) {
+  if (!text.trim()) return;
+
+  const preview = text.trim().slice(0, 120).replace(/</g, '&lt;');
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal">
+      <h3>Это Markdown?</h3>
+      <div style="font-size:12px;color:var(--dim);margin:8px 0 14px;
+                  background:var(--bg);border-radius:8px;padding:8px 10px;
+                  white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:hidden">
+        ${preview}${text.length > 120 ? '…' : ''}
+      </div>
+      <div class="modal-btns">
+        <button class="btn" id="_mdNo">Обычный текст</button>
+        <button class="btn accent" id="_mdYes">Markdown</button>
+      </div>
+    </div>`;
+  document.body.appendChild(bg);
+
+  document.getElementById('_mdNo').onclick = () => {
+    bg.remove();
+    loadWords(tokenize(text), source);
+  };
+  document.getElementById('_mdYes').onclick = () => {
+    bg.remove();
+    const { ws, meta } = parseMarkdown(text);
+    loadContent(ws, meta, source);
+  };
+}
+
+/* Вставить из буфера */
+async function pasteText() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text.trim()) { showPasteModal(); return; }
+    askMarkdownAndLoad(text, 'буфер обмена');
+  } catch {
+    showPasteModal();   // Safari иногда требует подтверждения — показываем textarea
+  }
+}
+
+function showPasteModal() {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `
+    <div class="modal">
+      <h3>Вставьте текст</h3>
+      <textarea id="_pasteTA" placeholder="Вставьте сюда текст..."></textarea>
+      <div class="modal-btns">
+        <button class="btn" id="_cancelBtn">Отмена</button>
+        <button class="btn accent" id="_okBtn">Загрузить</button>
+      </div>
+    </div>`;
+  document.body.appendChild(bg);
+  document.getElementById('_pasteTA').focus();
+  document.getElementById('_cancelBtn').onclick = () => bg.remove();
+  document.getElementById('_okBtn').onclick = () => {
+    const text = document.getElementById('_pasteTA').value;
+    bg.remove();
+    if (text.trim()) askMarkdownAndLoad(text, 'буфер обмена');
+  };
+}
+
+/* ── EPUB ──────────────────────────────────────────────────────────────── */
+async function loadEpub(buf, filename) {
+  if (typeof JSZip === 'undefined') {
+    alert('Для EPUB нужен интернет (JSZip не загружен).\nОткройте .txt или вставьте текст.');
+    return;
+  }
+  try {
+    const zip = await JSZip.loadAsync(buf);
+
+    /* Найти .opf через META-INF/container.xml */
+    let opfPath = null;
+    const container = zip.file('META-INF/container.xml');
+    if (container) {
+      const xml = await container.async('text');
+      const m   = xml.match(/full-path="([^"]+\.opf)"/i);
+      if (m) opfPath = m[1];
+    }
+    if (!opfPath) {
+      zip.forEach((p) => { if (p.endsWith('.opf')) opfPath = p; });
+    }
+
+    let contentFiles = [];
+    if (opfPath) {
+      const opfText  = await zip.file(opfPath).async('text');
+      const base     = opfPath.replace(/[^/]*$/, '');
+      const parser   = new DOMParser();
+      const opf      = parser.parseFromString(opfText, 'application/xml');
+      const spineIds = [...opf.querySelectorAll('spine itemref')]
+                         .map(el => el.getAttribute('idref'));
+      for (const id of spineIds) {
+        const item = opf.querySelector(`manifest item[id="${id}"]`);
+        if (!item) continue;
+        const href = base + item.getAttribute('href');
+        const f    = zip.file(href) || zip.file(item.getAttribute('href'));
+        if (f) contentFiles.push(f);
+      }
+    }
+
+    if (!contentFiles.length) {
+      zip.forEach((p, f) => { if (/\.(xhtml|html)$/i.test(p)) contentFiles.push(f); });
+    }
+
+    let allText = '';
+    for (const f of contentFiles) {
+      const html = await f.async('text');
+      const doc  = new DOMParser().parseFromString(html, 'text/html');
+      allText   += (doc.body?.innerText ?? '') + ' ';
+    }
+
+    loadWords(tokenize(allText), filename);
+  } catch (err) {
+    alert('Ошибка чтения EPUB: ' + err.message);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Жесты касания (на карточке)
+═══════════════════════════════════════════════════════════════════════════ */
+let tx = 0, ty = 0, tt = 0;
+
+document.getElementById('card').addEventListener('touchstart', e => {
+  tx = e.touches[0].clientX;
+  ty = e.touches[0].clientY;
+  tt = Date.now();
+}, { passive: true });
+
+document.getElementById('card').addEventListener('touchend', e => {
+  const dx   = e.changedTouches[0].clientX - tx;
+  const dy   = e.changedTouches[0].clientY - ty;
+  const dist = Math.hypot(dx, dy);
+  const dt   = Date.now() - tt;
+
+  if (dist < 12 && dt < 300) {
+    togglePlay();                              // tap → пауза / старт
+  } else if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+    skip(dx < 0 ? 1 : -1);                    // свайп → ±1 слово
+  }
+}, { passive: true });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Физическая клавиатура (Smart Keyboard, Magic Keyboard)
+═══════════════════════════════════════════════════════════════════════════ */
+document.addEventListener('keydown', e => {
+  switch (e.key) {
+    case ' ':          e.preventDefault(); togglePlay();    break;
+    case 'ArrowLeft':  e.preventDefault(); skip(-1);        break;
+    case 'ArrowRight': e.preventDefault(); skip(1);         break;
+    case 'ArrowUp':    e.preventDefault(); adj('wpm', 25);  break;
+    case 'ArrowDown':  e.preventDefault(); adj('wpm', -25); break;
+    case '[':          adj('fs', -2);  break;
+    case ']':          adj('fs',  2);  break;
+    case 'v': case 'V': toggleVertical(); break;
+  }
+});
+</script>
+</body>
+</html>
